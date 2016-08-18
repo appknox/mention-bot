@@ -6,13 +6,13 @@
   "alwaysNotifyForPaths": [
     {
       "name": "subho007", // The user's Github username
-      "files": ["*.js"] // The array of file globs associated with the user
+      "files": ["*.js", "mycroft/core/data/**/*.html", "*.java", "*/**/*.java", "moriarty/frida/**/*.js"] // The array of file globs associated with the user
     }
   ], // users will always be mentioned based on file glob
   "fallbackNotifyForPaths": [
     {
       "name": "subho007", // The user's Github username
-      "files": ["*.js"] // The array of file globs associated with the user
+      "files": ["*.js", "mycroft/core/data/**/*.html", "*.java", "*/**/*.java", "moriarty/frida/**/*.js"] // The array of file globs associated with the user
     }
   ], // users will be mentioned based on file glob if no other user was found
   "findPotentialReviewers": true, // mention-bot will try to find potential reviewers based on files history, if disabled, `alwaysNotifyForPaths` is used instead
