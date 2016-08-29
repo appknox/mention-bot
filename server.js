@@ -99,7 +99,12 @@ function getRepoConfig(request) {
       if (err) {
         reject(err);
       }
-      resolve(result);
+      try {
+        var data = JSON.parse(result.data);
+        resolve(data);
+      } catch (e) {
+        reject(e);
+      }
     });
   });
 }
@@ -133,6 +138,21 @@ async function work(body) {
     withLabel: '',
     skipCollaboratorPR: false,
   };
+  
+  if (process.env.MENTION_BOT_CONFIG) {
+    try {
+      repoConfig = {
+        ...repoConfig,
+        ...JSON.parse(process.env.MENTION_BOT_CONFIG)
+      };
+    } catch(e) {
+      console.error(
+        'Error attempting to read the config from the environment variable ' +
+        ' MENTION_BOT_CONFIG'
+      );
+      console.error(e);
+    }
+  }
 
   try {
     // request config from repo
