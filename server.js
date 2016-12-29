@@ -19,6 +19,7 @@ var util = require('util');
 var schedule = require('./schedule.js');
 
 var GitHubApi = require('github');
+var jsonlint = require('jsonlint');
 
 var CONFIG_PATH = '.mention-bot';
 
@@ -79,8 +80,8 @@ function buildMentionSentence(reviewers) {
 function defaultMessageGenerator(reviewers, pullRequester) {
   return util.format(
     '%s, thanks for your PR! ' +
-    'By analyzing the annotation information on this pull request' +
-    ', we identified %s to be%s potential reviewer%s',
+    'By analyzing the history of the files in this pull request' +
+    ', we identified %s to be%s potential reviewer%s.',
     pullRequester,
     buildMentionSentence(reviewers),
     reviewers.length > 1 ? '' : ' a',
@@ -103,6 +104,9 @@ function getRepoConfig(request) {
         var data = JSON.parse(result.data);
         resolve(data);
       } catch (e) {
+        try {
+          e.repoConfig = result.data;
+        } catch (e) {}
         reject(e);
       }
     });
@@ -159,16 +163,36 @@ async function work(body) {
     var configRes = await getRepoConfig({
       user: data.repository.owner.login,
       repo: data.repository.name,
+      ref: data.pull_request.base.ref,
       path: CONFIG_PATH,
       headers: {
         Accept: 'application/vnd.github.v3.raw+json'
+      }
+    }).catch(function(e) {
+      if (e instanceof SyntaxError && repoConfig.actions.indexOf(data.action) !== -1) {
+        // Syntax error while reading custom configuration file
+        var errorLog = '';
+        try {
+          jsonlint.parse(e.repoConfig)
+        } catch(err) {
+          errorLog = err;
+        }
+        var message =
+          'Unable to parse mention-bot custom configuration file due to a syntax error.\n' +
+          'Please check the potential root causes below:\n\n' +
+          '1. Having comments\n' +
+          '2. Invalid JSON type\n' +
+          '3. Having extra "," in the last JSON attribute\n\n' +
+          'Error message:\n' +
+          '```\n' + errorLog + '\n```';
+        createComment(data, message);
       }
     });
 
     repoConfig = {...repoConfig, ...configRes};
   } catch (e) {
     if (e.code === 404 &&
-        e.message === '{"message":"Not Found","documentation_url":"https://developer.github.com/v3"}') {
+        e.message.match(/message.*Not Found.*documentation_url.*developer.github.com/)) {
       console.log('Couldn\'t find ' + CONFIG_PATH + ' in repo. Continuing with default configuration.');
     } else {
       console.error(e);

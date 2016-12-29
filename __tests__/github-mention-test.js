@@ -16,8 +16,10 @@ jest
 require.requireActual('babel-polyfill');
 var mentionBot = require('../mention-bot.js');
 var fs = require('fs');
+const GitHubApi = require('github');
 
 describe('Github Mention', function() {
+  const github = new GitHubApi();
 
   function getFile(filename) {
     return fs.readFileSync(__dirname + '/data/' + filename, 'utf8');
@@ -72,7 +74,8 @@ describe('Github Mention', function() {
           requiredOrgs: [],
           numFilesToCheck: 5,
           findPotentialReviewers: true,
-        }
+        },
+        github
       ).then(function(owners) {
         expect(owners).toEqual(['corbt', 'vjeux', 'sahrens']);
       });
@@ -230,11 +233,50 @@ describe('Github Mention', function() {
               name: 'jcsmorais',
               files: ['website/server/*']
             }]
-          }
+          },
+          github
         ).then(function(owners) {
           expect(owners).toEqual(['jcsmorais']);
         });
       });
+
+    pit('Ignores PRs made against files owned by a team you are a member of if `skipTeamPrs` is set', function() {
+      mentionBot.enableCachingForDebugging = true;
+      var githubMock = {
+        orgs: {
+          getTeams: jest.genMockFunction().mockImplementation(function(params, cb) {
+            cb(null, [{slug: 'myteam', id: 1}]);
+          }),
+          getTeamMembership: jest.genMockFunction().mockImplementation(function(params, cb) {
+            cb(null, {state: 'active'});
+          })
+        }
+      };
+      return mentionBot.guessOwnersForPullRequest(
+        reactNativePR.repoName,
+        reactNativePR.prNumber,
+        reactNativePR.prUser,
+        reactNativePR.prBaseBranch,
+        true, //Set private repo to true
+        reactNativePR.org,
+        {
+          maxReviewers: 3,
+          userBlacklist: [],
+          fileBlacklist: [],
+          requiredOrgs: [],
+          numFilesToCheck: 5,
+          findPotentialReviewers: false,
+          alwaysNotifyForPaths: [{
+            name: 'facebook/myteam',
+            files: ['website/server/*'],
+            skipTeamPrs: true
+          }]
+        },
+        githubMock
+      ).then(function(owners) {
+        expect(owners.length).toEqual(0);
+      });
+    });
 
     pit('Messages 5 users from config option maxUsersToPing', function() {
       mentionBot.enableCachingForDebugging = true;
@@ -252,7 +294,8 @@ describe('Github Mention', function() {
           requiredOrgs: [],
           numFilesToCheck: 5,
           findPotentialReviewers: true,
-        }
+        },
+        github
       ).then(function(owners) {
         expect(owners.length).toEqual(5);
       });
@@ -280,7 +323,8 @@ describe('Github Mention', function() {
               files: ['package.json', '**/*.js', 'README.md']
             }
           ]
-        }
+        },
+        github
       ).then(function(owners) {
         expect(owners.indexOf('ghuser')).toBeGreaterThan(-1);
       });
@@ -317,7 +361,8 @@ describe('Github Mention', function() {
               files: ['*.js']
             }
           ]
-        }
+        },
+        github
       ).then(function(owners) {
         expect(owners.indexOf('ghuser')).toBeGreaterThan(-1);
       });
@@ -339,7 +384,8 @@ describe('Github Mention', function() {
           requiredOrgs: [],
           numFilesToCheck: 5,
           findPotentialReviewers: true
-        }
+        },
+        github
       ).then(function (owners) {
         expect(owners.indexOf('ghuser')).toEqual(-1);
       });

@@ -53,7 +53,18 @@ type FileInfo = {
 
 type WhitelistUser = {
   name: string,
-  files: Array<string>
+  files: Array<string>,
+  skipTeamPrs: bool
+};
+
+type TeamData = {
+  name: string,
+  id: number
+};
+
+type TeamMembership = {
+  name: string,
+  state: string
 };
 
 function startsWith(str, start) {
@@ -251,10 +262,35 @@ function getSortedOwners(
   return sorted_owners;
 }
 
-function getMatchingOwners(
+async function getDiffForPullRequest(
+  owner: string,
+  repo: string,
+  id: number,
+  github: Object
+): Promise<string> {
+  return new Promise(function(resolve, reject) {
+    github.pullRequests.get({
+      user: owner,
+      repo: repo,
+      number: id,
+      headers: {Accept: 'application/vnd.github.diff'}
+    }, function (err, result) {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(result.data);
+      }
+    });
+  });
+}
+
+async function getMatchingOwners(
   files: Array<FileInfo>,
-  whitelist: Array<WhitelistUser>
-): Array<string> {
+  whitelist: Array<WhitelistUser>,
+  creator: string,
+  org: ?string,
+  github: Object
+): Promise<Array<string>> {
   var owners = [];
   var users = whitelist || [];
 
@@ -274,7 +310,46 @@ function getMatchingOwners(
     }
   });
 
+  if (org) {
+    owners = await filterOwnTeam(users, owners, creator, org, github);
+  }
   return owners;
+}
+
+async function filterOwnTeam(
+  users: Array<WhitelistUser>,
+  owners: Array<string>,
+  creator: string,
+  org: string,
+  github: Object
+): Promise<Array<string>> {
+  if (!users.some(function(user) {
+    return user.skipTeamPrs;
+  })) {
+    return owners;
+  }
+  
+  // GitHub does not provide an API to look up a team by name.
+  // Instead, get all teams, then filter against those matching
+  // our teams list who want to be excluded from their own PR's.
+  var teamData = await getTeams(org, github, 0);
+  teamData = teamData.filter(function(team) {
+    return users.some(function(user) {
+      return user.skipTeamPrs && user.name === team.name;
+    });
+  });
+  var promises = teamData.map(function(teamInfo) {
+    return getTeamMembership(creator, teamInfo, github);
+  });
+  var teamMemberships = await Promise.all(promises);
+  teamMemberships = teamMemberships.filter(function(membership) {
+    return membership.state === 'active';
+  });
+  return owners.filter(function(owner) {
+    return !teamMemberships.find(function(membership) {
+        return owner === membership.name;
+    });
+  });
 }
 
 /**
@@ -284,21 +359,63 @@ function getMatchingOwners(
  * you won't be able to get anymore work done when it happens :(
  */
 async function fetch(url: string): Promise<string> {
+  const cacheKey = url.replace(/[^a-zA-Z0-9-_\.]/g, '-');
+  return cacheGet(cacheKey, () => downloadFileAsync(url, githubAuthCookies));
+}
+
+async function cacheGet(
+  cacheKey: string,
+  getFn: () => Promise<string>
+): Promise<string> {
   if (!module.exports.enableCachingForDebugging) {
-    return downloadFileAsync(url, githubAuthCookies);
+    return getFn();
   }
 
-  var cacheDir = __dirname + '/cache/';
-
+  const cacheDir = __dirname + '/cache/';
   if (!fs.existsSync(cacheDir)) {
     fs.mkdir(cacheDir);
   }
-  var cache_key = cacheDir + url.replace(/[^a-zA-Z0-9-_\.]/g, '-');
-  if (!fs.existsSync(cache_key)) {
-    var file = await downloadFileAsync(url, githubAuthCookies);
-    fs.writeFileSync(cache_key, file);
+
+  cacheKey = cacheDir + cacheKey;
+  if (!fs.existsSync(cacheKey)) {
+    const contents = await getFn();
+    fs.writeFileSync(cacheKey, contents);
   }
-  return readFileAsync(cache_key, 'utf8');
+  return readFileAsync(cacheKey, 'utf8');
+}
+
+async function getTeams(
+  org: string,
+  github: Object,
+  page: number
+): Promise<Array<TeamData>> {
+  const perPage = 100;
+  return new Promise(function(resolve, reject) {
+    github.orgs.getTeams({
+      org: org,
+      page: page,
+      per_page: perPage
+    }, function(err, teams) {
+      if (err) {
+        reject(err);
+      } else {
+        var teamData = teams.map(function(team) {
+          return {
+            name: org + "/" + team.slug,
+            id: team.id
+          };
+        });
+        if (teamData.length === perPage) {
+          getTeams(org, github, ++page).then(function(results) {
+            resolve(teamData.concat(results));
+          })
+          .catch(reject);
+        } else {
+          resolve(teamData);
+        }
+      }
+    });
+  });
 }
 
 async function getOwnerOrgs(
@@ -365,6 +482,30 @@ async function filterRequiredOrgs(
     // user passes if he is in any of the required organizations
     return config.requiredOrgs.some(function(reqOrg) {
       return userOrgs[index].indexOf(reqOrg) >= 0;
+    });
+  });
+}
+
+async function getTeamMembership(
+  creator: string,
+  teamData: TeamData,
+  github: Object
+): Promise<TeamMembership> {
+  return new Promise(function(resolve, reject) {
+    github.orgs.getTeamMembership({
+      id: teamData.id,
+      user: creator
+    }, function(err, data) {
+      if (err) {
+        if (err.code === 404 &&
+                err.message === '{"message":"Not Found","documentation_url":"https://developer.github.com/v3"}') {
+          resolve({name: teamData.name, state: 'nonmember'});
+        } else {
+          reject(err);
+        }
+      } else {
+        resolve({name: teamData.name, state: data.state});
+      }
     });
   });
 }
@@ -483,10 +624,15 @@ async function guessOwnersForPullRequest(
   config: Object,
   github: Object
 ): Promise<Array<string>> {
-  var diff = await fetch(repoURL + '/pull/' + id + '.diff');
+  const ownerAndRepo = repoURL.split('/').slice(-2);
+  const cacheKey = `${repoURL}-pull-${id}.diff`.replace(/[^a-zA-Z0-9-_\.]/g, '-');
+  const diff = await cacheGet(
+    cacheKey,
+    () => getDiffForPullRequest(ownerAndRepo[0], ownerAndRepo[1], id, github)
+  );
   var files = parseDiff(diff);
-  var defaultOwners = getMatchingOwners(files, config.alwaysNotifyForPaths);
-  var fallbackOwners = getMatchingOwners(files, config.fallbackNotifyForPaths);
+  var defaultOwners = await getMatchingOwners(files, config.alwaysNotifyForPaths, creator, org, github);
+  var fallbackOwners = await getMatchingOwners(files, config.fallbackNotifyForPaths, creator, org, github);
   if (!config.findPotentialReviewers) {
       return defaultOwners;
   }
